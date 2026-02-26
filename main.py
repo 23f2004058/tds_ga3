@@ -1,60 +1,110 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Literal
+from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
-import os
-import json
+import json, os
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-class CommentRequest(BaseModel):
-    comment: str
-
-class SentimentResponse(BaseModel):
-    sentiment: Literal["positive", "negative", "neutral"]
-    rating: int
-
-@app.post("/comment", response_model=SentimentResponse)
-async def analyze_comment(request: CommentRequest):
-    if not request.comment or not request.comment.strip():
-        raise HTTPException(status_code=400, detail="Comment cannot be empty")
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a sentiment analysis assistant. "
-                        "Analyze the sentiment of the given comment and return JSON with exactly two fields:\n"
-                        "- sentiment: must be exactly 'positive', 'negative', or 'neutral'\n"
-                        "- rating: integer 1-5 where 5=highly positive, 1=highly negative, 3=neutral\n"
-                        "Return ONLY valid JSON, nothing else."
-                    )
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ticket_status",
+            "description": "Get the status of an IT support ticket",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticket_id": {"type": "integer", "description": "The ticket ID number"}
                 },
-                {
-                    "role": "user",
-                    "content": request.comment
-                }
-            ],
-            response_format={"type": "json_object"},
-        )
+                "required": ["ticket_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_meeting",
+            "description": "Schedule a meeting on a specific date, time and room",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "Date in YYYY-MM-DD format"},
+                    "time": {"type": "string", "description": "Time in HH:MM format"},
+                    "meeting_room": {"type": "string", "description": "The meeting room name"}
+                },
+                "required": ["date", "time", "meeting_room"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_expense_balance",
+            "description": "Get the expense reimbursement balance for an employee",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "employee_id": {"type": "integer", "description": "The employee ID number"}
+                },
+                "required": ["employee_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_performance_bonus",
+            "description": "Calculate the performance bonus for an employee for a given year",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "employee_id": {"type": "integer", "description": "The employee ID number"},
+                    "current_year": {"type": "integer", "description": "The year for bonus calculation"}
+                },
+                "required": ["employee_id", "current_year"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "report_office_issue",
+            "description": "Report an office issue with an issue code and department",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "issue_code": {"type": "integer", "description": "The issue code number"},
+                    "department": {"type": "string", "description": "The department name"}
+                },
+                "required": ["issue_code", "department"]
+            }
+        }
+    }
+]
 
-        content = response.choices[0].message.content
-        data = json.loads(content)
+@app.get("/execute")
+async def execute(q: str = Query(..., description="The query to execute")):
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant that extracts function calls from user queries. Always call the most appropriate function."},
+            {"role": "user", "content": q}
+        ],
+        tools=tools,
+        tool_choice="required"
+    )
 
-        sentiment = data.get("sentiment", "neutral").lower()
-        if sentiment not in ["positive", "negative", "neutral"]:
-            sentiment = "neutral"
-
-        rating = int(data.get("rating", 3))
-        rating = max(1, min(5, rating))
-
-        return SentimentResponse(sentiment=sentiment, rating=rating)
-
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Failed to parse AI response")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"API error: {str(e)}")
+    tool_call = response.choices[0].message.tool_calls[0]
+    return {
+        "name": tool_call.function.name,
+        "arguments": tool_call.function.arguments
+    }
